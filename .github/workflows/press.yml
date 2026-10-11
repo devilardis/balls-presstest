@@ -52,8 +52,10 @@ on:
         default: "3.0"
 
 concurrency:
-  # jihai 四域共享 runner 出口 IP,族内必须串行;不同站点族(如 f599)目标闸门独立,可并行
-  group: presstest-${{ startsWith(inputs.site, 'jihai') && 'jihai' || 'other' }}
+  # jihai 四域共享 runner 出口 IP,族内必须串行;不同站点族(如 f599)目标闸门独立,可并行。
+  # 判族取 sites 首个 key(2026-10-11 修复:此前只看 site,派发用 sites 时判空→两 run 落
+  # 同组串行,f599 白等 6 小时)。
+  group: presstest-${{ startsWith(inputs.sites || inputs.site, 'jihai') && 'jihai' || 'other' }}
   cancel-in-progress: false
 
 jobs:
