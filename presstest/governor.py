@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
-"""governor.py 鈥?鎷熶汉鍖栬姹傝妭濂忓櫒 + 棰勭畻闂?+ 閫€閬挎(鍘嬫祴鎺㈤拡涓庢湭鏉ュ悇婧愬埛鏂扮瓥鐣ュ叡鐢?
+"""governor.py — 拟人化请求节奏器 + 预算闸 + 退避梯(压测探针与未来各源刷新策略共用)
 
-璁捐鐩爣(2026-10-11 澶氭簮鍘嬫祴瀹氭鐨勫墠缃欢):
-  路 姣忎釜鏁版嵁婧?鍗冲棬鍥涘煙 / 599 / 鏈潵鏂板绔?鍚勬寔涓€涓嫭绔?Profile;
-  路 鍒锋柊闂撮殧鍋氬鏁版鎬佹姈鍔?浜虹被娴忚鐨勯棿闅斿垎甯冨彸鍋?涓綅鏁伴檮杩戝瘑闆嗐€佸伓鍙戦暱鍋滈】),
-    澶栧姞銆岄槄璇诲仠椤裤€嶁€斺€斾綆姒傜巼鎻掑叆 3~15 绉掔殑闀块棿姝?妯℃嫙鐪熶汉鐪嬮〉闈?
-  路 淇濆畧浣欓噺:鐢熶骇鍩哄噯鐜?= 瀹炴祴杈圭晫 脳 瀹夊叏绯绘暟(榛樿 0.4,瑙?README);
-  路 閫€閬挎:403/429 鎸夎繛缁鏁板崌绾ф殏鍋?2鈫?0鈫?0鈫?0 鍒嗛挓灏侀《),200 杩炵画杈炬爣闄嶇骇;
-  路 棰勭畻闂?鍗曟杩愯/鍗曟棩鐨勮姹傛暟涓庡閽熶笂闄?鍙屼繚闄?鍒伴檺鍗冲仠銆?
-鏈ā鍧楀彧渚濊禆鏍囧噯搴?鍘嬫祴鎺㈤拡(probe.py)涓庢湭鏉?engine/collector 鐨勯€愭簮鍒锋柊
-鍏辩敤鍚屼竴濂楄妭濂忚涔?淇濊瘉銆屾祴鍑烘潵鐨勮竟鐣屻€嶄笌銆岀敓浜ц窇鐨勭瓥鐣ャ€嶆槸鍚屼竴鎶婂昂瀛愩€?"""
+设计目标(2026-10-11 多源压测定案的前置件):
+  · 每个数据源(即嗨四域 / 599 / 未来新增站)各持一个独立 Profile;
+  · 刷新间隔做对数正态抖动(人类浏览的间隔分布右偏,中位数附近密集、偶发长停顿),
+    外加「阅读停顿」——低概率插入 3~15 秒的长间歇,模拟真人看页面;
+  · 保守余量:生产基准率 = 实测边界 × 安全系数(默认 0.4,见 README);
+  · 退避梯:403/429 按连续次数升级暂停(2→10→30→60 分钟封顶),200 连续达标降级;
+  · 预算闸:单次运行/单日的请求数与墙钟上限,双保险,到限即停。
+
+本模块只依赖标准库;压测探针(probe.py)与未来 engine/collector 的逐源刷新
+共用同一套节奏语义,保证「测出来的边界」与「生产跑的策略」是同一把尺子。
+"""
 from __future__ import annotations
 
 import math
@@ -17,10 +19,14 @@ import random
 import time
 
 
-# ---------------------------------------------------------------- 鑺傚鍣?class Pacer:
-    """鎸夌洰鏍囧钩鍧囬棿闅斾骇鐢熸姈鍔ㄥ欢杩熴€?
-    mode="uniform": 卤pct 鍧囧寑灏忔姈鍔ㄢ€斺€旂敤浜?ramp 闃舵绮剧‘鎺х巼鎵捐竟鐣?
-    mode="human":  瀵规暟姝ｆ€佹姈鍔?+ 浣庢鐜囬槄璇诲仠椤库€斺€旂敤浜?soak 涓庣敓浜у埛鏂般€?    delay = base * exp(-蟽虏/2) * exp(蟽路z)  淇濊瘉鏈熸湜鍊兼伆涓?base(蟽 涓哄鏁版爣鍑嗗樊)銆?    """
+# ---------------------------------------------------------------- 节奏器
+class Pacer:
+    """按目标平均间隔产生抖动延迟。
+
+    mode="uniform": ±pct 均匀小抖动——用于 ramp 阶段精确控率找边界;
+    mode="human":  对数正态抖动 + 低概率阅读停顿——用于 soak 与生产刷新。
+    delay = base * exp(-σ²/2) * exp(σ·z)  保证期望值恰为 base(σ 为对数标准差)。
+    """
 
     def __init__(self, base_interval: float, *, mode: str = "human",
                  sigma: float = 0.35, pct: float = 0.10,
@@ -34,7 +40,7 @@ import time
         self.pct = float(pct)
         self.break_prob = float(break_prob)
         self.break_range = break_range
-        # floor 涓嶅緱楂樹簬 base,鍚﹀垯鐩爣閫熺巼姘歌繙杈句笉鍒?鎵捐竟鐣屾椂浼氳閽充綇)
+        # floor 不得高于 base,否则目标速率永远达不到(找边界时会被钳住)
         self.floor = min(max(0.0, float(floor)), self.base)
         self.rng = random.Random(seed)
 
@@ -53,8 +59,9 @@ import time
         return cls(1.0 / rate_per_sec, **kw)
 
 
-# ---------------------------------------------------------------- 棰勭畻闂?class Budget:
-    """璇锋眰鏁?+ 澧欓挓鍙屼笂闄愩€俿pend() 杩斿洖 False 琛ㄧず棰勭畻鑰楀敖,璋冪敤鏂瑰繀椤诲仠銆?""
+# ---------------------------------------------------------------- 预算闸
+class Budget:
+    """请求数 + 墙钟双上限。spend() 返回 False 表示预算耗尽,调用方必须停。"""
 
     def __init__(self, max_requests: int = 30000, max_seconds: float = 6 * 3600):
         self.max_requests = int(max_requests)
@@ -75,11 +82,13 @@ import time
         return time.time() - self.t0
 
 
-# ---------------------------------------------------------------- 閫€閬挎
+# ---------------------------------------------------------------- 退避梯
 class Backoff:
-    """403/429 杩炵画鍗囩骇鏆傚仠;200 杩炵画杈炬爣闄嶄竴绾с€?
-    姊害(绉?: 120 鈫?600 鈫?1800 鈫?3600 灏侀《鈥斺€旀瘮 engine 鐜拌鐨?90s 璧锋鏇翠繚瀹?
-    鍘嬫祴閲岃Е鍙戦椄闂ㄥ悗鏈氨璇ラ暱姝?鐢熶骇鍚敤鏃朵互瀹炴祴鎭㈠鏃堕棿涓哄噯閲嶆牎銆?    """
+    """403/429 连续升级暂停;200 连续达标降一级。
+
+    梯度(秒): 120 → 600 → 1800 → 3600 封顶——比 engine 现行的 90s 起步更保守,
+    压测里触发闸门后本就该长歇;生产启用时以实测恢复时间为准重校。
+    """
 
     LADDER = (120, 600, 1800, 3600)
 
@@ -93,7 +102,7 @@ class Backoff:
         self.total_pauses = 0
 
     def on_block(self, now: float | None = None) -> float:
-        """璁板綍涓€娆?403/429;杈惧埌 trigger_n 鍗冲崌绾ф殏鍋?杩斿洖鏆傚仠鎴鏃跺埢銆?""
+        """记录一次 403/429;达到 trigger_n 即升级暂停,返回暂停截止时刻。"""
         now = now if now is not None else time.time()
         self.consec_block += 1
         self.consec_ok = 0
@@ -105,7 +114,7 @@ class Backoff:
         return self.pause_until
 
     def on_ok(self) -> bool:
-        """璁板綍涓€娆?200;杩炵画 recover_n 娆″垯闄嶄竴绾у苟娓呴浂,杩斿洖鏄惁闄嶇骇銆?""
+        """记录一次 200;连续 recover_n 次则降一级并清零,返回是否降级。"""
         self.consec_ok += 1
         self.consec_block = 0
         if self.consec_ok >= self.recover_n and self.level > 0:
@@ -119,14 +128,15 @@ class Backoff:
         return time.time() < self.pause_until
 
 
-# ---------------------------------------------------------------- 鏄煎鍖呯粶
-# 鐢熶骇寤鸿(鍘嬫祴榛樿涓嶇敤):鍖椾含鏃堕棿娣卞浣庢椿璺冦€佸倣鏅氶珮宄扳€斺€斾箻鏁拌秺灏忎簨瓒婂皯銆?DEFAULT_ENVELOPE = {h: (0.45 if 3 <= h < 8 else (1.0 if 8 <= h < 19 else 1.25))
+# ---------------------------------------------------------------- 昼夜包络
+# 生产建议(压测默认不用):北京时间深夜低活跃、傍晚高峰——乘数越小事越少。
+DEFAULT_ENVELOPE = {h: (0.45 if 3 <= h < 8 else (1.0 if 8 <= h < 19 else 1.25))
                     for h in range(24)}
 
 
 def envelope_multiplier(mult_table: dict[int, float] | None = None,
                         now: float | None = None) -> float:
-    """鎸夊寳浜椂闂村皬鏃惰繑鍥炲埛鏂扮巼涔樻暟;mult_table 缂虹渷鐢?DEFAULT_ENVELOPE銆?""
+    """按北京时间小时返回刷新率乘数;mult_table 缺省用 DEFAULT_ENVELOPE。"""
     table = mult_table if mult_table is not None else DEFAULT_ENVELOPE
     from datetime import datetime, timezone, timedelta
     tz8 = timezone(timedelta(hours=8))
@@ -134,10 +144,13 @@ def envelope_multiplier(mult_table: dict[int, float] | None = None,
     return float(table.get(h, 1.0))
 
 
-# ---------------------------------------------------------------- 婧愮瓥鐣ユ。
+# ---------------------------------------------------------------- 源策略档
 class SourceProfile:
-    """涓€涓暟鎹簮鐨勫畬鏁村埛鏂扮瓥鐣?鐢熶骇褰㈡€?鍘嬫祴鎺㈤拡鍙敤鍏朵腑 Pacer/Backoff)銆?
-    safe_factor: 鐢熶骇鍩哄噯鐜?= measured_boundary(瀹炴祴棣?03閫熺巼) 脳 safe_factor銆?    0.4 琛ㄧず鐣?2.5 鍊嶄綑閲?杈圭晫鏁版嵁缂虹渷鏃?rate 鐩存帴缁欎繚瀹堢粷瀵瑰€笺€?    """
+    """一个数据源的完整刷新策略(生产形态;压测探针只用其中 Pacer/Backoff)。
+
+    safe_factor: 生产基准率 = measured_boundary(实测首403速率) × safe_factor。
+    0.4 表示留 2.5 倍余量;边界数据缺省时 rate 直接给保守绝对值。
+    """
 
     def __init__(self, name: str, *, rate: float | None = None,
                  boundary: float | None = None, safe_factor: float = 0.4,
@@ -147,7 +160,7 @@ class SourceProfile:
         self.name = name
         if rate is None:
             if boundary is None:
-                raise ValueError(f"{name}: rate 涓?boundary 鑷冲皯缁欎竴涓?)
+                raise ValueError(f"{name}: rate 与 boundary 至少给一个")
             rate = boundary * safe_factor
         self.rate = float(rate)
         self.use_envelope = use_envelope
@@ -175,16 +188,18 @@ class SourceProfile:
                                floor=self.pacer.floor).next_delay()
 
 
-# ---------------------------------------------------------------- 瀹炴祴鍥炲～妗?# 2026-10-11 浜旂珯 ramp 瀹炴祴鍥炲～(GHA runner 鍗曡疆鍗?IP,鎺㈤拡纭《 3.0 req/s):
-#   jihai_dc      5077 璇锋眰 闆?403(run 38113189305)
-#   f599_rest     5405 璇锋眰 闆?403(run 38113194699)
-#   jihai_www     涓よ疆鍏?7268 璇锋眰 闆?403;502 鍗?~3% 涓斾笌閫熺巼鏃犲叧
-#                 (鍒楄〃椤佃儗鏅姈鍔?闈炲皝閿?(run 38113212693 + 38113323142)
-#   jihai_apinode 4820 璇锋眰 闆?403;204 鍗?~8.3% 鎭掑畾,涓洪檲鏃ф牱鏈満娆℃棤鏁版嵁,
-#                 闈炲皝閿?run 38113323142)
-#   jihai_apilive 3796 璇锋眰 鍏?200(run 38113323142)
-# 鏁呬簲绔欒竟鐣屽潎璁颁笅鐣?3.0(鐪熷疄杈圭晫 鈮?.0,鏈Е椤?,鐢熶骇鍩哄噯鐜?= 3.0 脳 0.4
-# = 1.2 req/s;鍏ㄧ▼闆?403 鏃犳仮澶嶆椂闂存暟鎹?Backoff 姊害娌跨敤榛樿銆?PROFILES: dict[str, SourceProfile] = {
+# ---------------------------------------------------------------- 实测回填档
+# 2026-10-11 五站 ramp 实测回填(GHA runner 单轮单 IP,探针硬顶 3.0 req/s):
+#   jihai_dc      5077 请求 零 403(run 38113189305)
+#   f599_rest     5405 请求 零 403(run 38113194699)
+#   jihai_www     两轮共 7268 请求 零 403;502 占 ~3% 且与速率无关
+#                 (列表页背景抖动,非封锁)(run 38113212693 + 38113323142)
+#   jihai_apinode 4820 请求 零 403;204 占 ~8.3% 恒定,为陈旧样本场次无数据,
+#                 非封锁(run 38113323142)
+#   jihai_apilive 3796 请求 全 200(run 38113323142)
+# 故五站边界均记下界 3.0(真实边界 ≥3.0,未触顶),生产基准率 = 3.0 × 0.4
+# = 1.2 req/s;全程零 403 无恢复时间数据,Backoff 梯度沿用默认。
+PROFILES: dict[str, SourceProfile] = {
     "jihai_dc":      SourceProfile("jihai_dc",      boundary=3.0),
     "f599_rest":     SourceProfile("f599_rest",     boundary=3.0),
     "jihai_www":     SourceProfile("jihai_www",     boundary=3.0),
@@ -194,18 +209,18 @@ class SourceProfile:
 
 
 if __name__ == "__main__":
-    # 鑷祴:涓嶅彂缃戠粶璇锋眰
+    # 自测:不发网络请求
     p = Pacer(2.0, mode="human", seed=42)
     ds = [p.next_delay() for _ in range(20000)]
     mean = sum(ds) / len(ds)
-    # human 鍧囧€?= base + 闃呰鍋滈】鏈熸湜(棰濆鍔?鏂瑰悜淇濆畧:瀹為檯閫熺巼鐣ヤ綆浜庡悕涔?
+    # human 均值 = base + 阅读停顿期望(额外加,方向保守:实际速率略低于名义)
     expect = 2.0 + p.break_prob * sum(p.break_range) / 2
-    assert abs(mean - expect) < 0.15, f"human 鍧囧€煎亸绂绘湡鏈? {mean} vs {expect}"
+    assert abs(mean - expect) < 0.15, f"human 均值偏离期望: {mean} vs {expect}"
     assert min(ds) >= p.floor
     p2 = Pacer.from_rate(1.0, mode="uniform", seed=1)
     d2 = [p2.next_delay() for _ in range(5000)]
     assert abs(1.0 / (sum(d2) / len(d2)) - 1.0) < 0.02
-    # floor 涓嶅緱閽充綇楂橀€熺巼:3 req/s(base=0.333)鏃?floor 蹇呴』缂╁埌 base
+    # floor 不得钳住高速率:3 req/s(base=0.333)时 floor 必须缩到 base
     p3 = Pacer.from_rate(3.0, mode="uniform", floor=0.8, seed=2)
     assert p3.floor <= 1.0 / 3.0 + 1e-9
     b = Budget(max_requests=5)
@@ -220,5 +235,5 @@ if __name__ == "__main__":
     prof = SourceProfile("t", boundary=2.0)
     assert abs(prof.rate - 0.8) < 1e-9
     assert prof.next_delay() > 0
-    print(f"governor 鑷祴閫氳繃: human鍧囧€?{mean:.3f}(鏈熸湜={expect:.3f}), "
-          f"uniform鐜?{1.0/(sum(d2)/len(d2)):.4f}, boundary2.0鈫掑熀鍑嗙巼{prof.rate}")
+    print(f"governor 自测通过: human均值={mean:.3f}(期望={expect:.3f}), "
+          f"uniform率={1.0/(sum(d2)/len(d2)):.4f}, boundary2.0→基准率{prof.rate}")
