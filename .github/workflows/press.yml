@@ -1,0 +1,94 @@
+# balls-presstest — 数据源频控边界压测(GitHub Actions)
+#
+# 部署:把本目录(presstest/)整个拷进一个**独立的公共调度仓**(勿与 standby
+# 调度仓混用,压测流水线和生产采集互不干扰),文件放仓根的 presstest/ 下,
+# workflow 从 Actions 页手动触发(workflow_dispatch)。
+#
+# 安全设计:
+#   · concurrency 串行——同一时间只允许一个压测 job,避免多 runner 并发
+#     既污染「单 IP」测量假设,又对源站不礼貌;
+#   · timeout 355 分钟(GHA 单 job 上限 6h 内),探针内部另有预算双保险;
+#   · 只用公共 runner 的一次性 Azure IP,不涉及任何生产出口;
+#   · 产物(逐请求 JSONL + 汇总 report.json + 日志)上传 artifact 供回填策略。
+name: balls-presstest
+on:
+  workflow_dispatch:
+    inputs:
+      site:
+        description: "站点 key: jihai_www | jihai_apinode | jihai_apilive | jihai_dc | f599_rest"
+        required: true
+        default: "jihai_dc"
+      phase:
+        description: "auto(ramp→decay) | soak | decay"
+        required: true
+        default: "auto"
+      rate:
+        description: "soak 目标速率 req/s"
+        required: false
+        default: "1.0"
+      duration:
+        description: "soak 时长(秒)"
+        required: false
+        default: "3600"
+      start_rate:
+        description: "ramp 起始速率 req/s"
+        required: false
+        default: "0.5"
+      step_rate:
+        description: "ramp 每档步进 req/s"
+        required: false
+        default: "0.5"
+      step_mins:
+        description: "ramp 每档持续分钟"
+        required: false
+        default: "10"
+      max_rate:
+        description: "ramp 速率上限(硬顶 3.0)"
+        required: false
+        default: "3.0"
+
+concurrency:
+  # jihai 四域共享 runner 出口 IP,族内必须串行;不同站点族(如 f599)目标闸门独立,可并行
+  group: presstest-${{ startsWith(inputs.site, 'jihai') && 'jihai' || 'other' }}
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install deps
+        run: pip install requests curl_cffi cryptography
+
+      - name: Dry-run plan
+        run: |
+          python presstest/probe.py --site "${{ inputs.site }}" \
+            --phase "${{ inputs.phase }}" --rate "${{ inputs.rate }}" \
+            --duration "${{ inputs.duration }}" --start-rate "${{ inputs.start_rate }}" \
+            --step-rate "${{ inputs.step_rate }}" --step-mins "${{ inputs.step_mins }}" \
+            --max-rate "${{ inputs.max_rate }}"
+
+      - name: Run probe
+        run: |
+          python presstest/probe.py --site "${{ inputs.site }}" \
+            --phase "${{ inputs.phase }}" --rate "${{ inputs.rate }}" \
+            --duration "${{ inputs.duration }}" --start-rate "${{ inputs.start_rate }}" \
+            --step-rate "${{ inputs.step_rate }}" --step-mins "${{ inputs.step_mins }}" \
+            --max-rate "${{ inputs.max_rate }}" \
+            --go --out presstest_result.jsonl --report presstest_report.json 2>&1 | tee probe.log
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: presstest-${{ inputs.site }}-${{ inputs.phase }}-${{ github.run_id }}
+          path: |
+            presstest_result.jsonl
+            presstest_report.json
+            probe.log
+          if-no-files-found: warn
