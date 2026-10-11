@@ -276,9 +276,16 @@ def main():
         elif args.phase == "soak":
             pacer = Pacer.from_rate(args.rate, mode="human")
             backoff = Backoff(trigger_n=3)
-            seg = run_requests(t, site, ids_cache, cli_ids, pacer, budget,
+            # soak 必须按 duration 墙钟停止:此前误用共享预算(max_seconds=duration*3+6h),
+            # 实际按 max_requests/速率跑满(如 1.5req/s→5.6h),撞 GHA 355min job 上限被掐、
+            # artifacts 丢失(2026-10-11 两个 soak 均因此报废)
+            soak_budget = Budget(max_requests=args.max_requests,
+                                 max_seconds=args.duration)
+            seg = run_requests(t, site, ids_cache, cli_ids, pacer, soak_budget,
                                backoff, out, f"soak@{args.rate:.2f}")
+            budget.n += soak_budget.n
             seg["target_rate"] = args.rate
+            seg["duration_s"] = args.duration
             segments = [seg]
         elif args.phase == "decay":
             pacer = Pacer(1.0 / max(args.probe_interval, 1.0), mode="uniform", floor=1.0)
