@@ -15,9 +15,13 @@ on:
   workflow_dispatch:
     inputs:
       site:
-        description: "站点 key: jihai_www | jihai_apinode | jihai_apilive | jihai_dc | f599_rest"
-        required: true
-        default: "jihai_dc"
+        description: "单站点 key(jihai_www|jihai_apinode|jihai_apilive|jihai_dc|f599_rest);被 sites 覆盖"
+        required: false
+        default: ""
+      sites:
+        description: "逗号分隔多站点,同一 runner IP 串行逐站跑(族内实验顺序可控)"
+        required: false
+        default: ""
       phase:
         description: "auto(ramp→decay) | soak | decay"
         required: true
@@ -68,27 +72,36 @@ jobs:
 
       - name: Dry-run plan
         run: |
-          python presstest/probe.py --site "${{ inputs.site }}" \
-            --phase "${{ inputs.phase }}" --rate "${{ inputs.rate }}" \
-            --duration "${{ inputs.duration }}" --start-rate "${{ inputs.start_rate }}" \
-            --step-rate "${{ inputs.step_rate }}" --step-mins "${{ inputs.step_mins }}" \
-            --max-rate "${{ inputs.max_rate }}"
+          SITES="${{ inputs.sites }}"
+          [ -z "$SITES" ] && SITES="${{ inputs.site }}"
+          for s in $(echo "$SITES" | tr ',' ' '); do
+            python presstest/probe.py --site "$s" \
+              --phase "${{ inputs.phase }}" --rate "${{ inputs.rate }}" \
+              --duration "${{ inputs.duration }}" --start-rate "${{ inputs.start_rate }}" \
+              --step-rate "${{ inputs.step_rate }}" --step-mins "${{ inputs.step_mins }}" \
+              --max-rate "${{ inputs.max_rate }}" || true
+          done
 
       - name: Run probe
         run: |
-          python presstest/probe.py --site "${{ inputs.site }}" \
-            --phase "${{ inputs.phase }}" --rate "${{ inputs.rate }}" \
-            --duration "${{ inputs.duration }}" --start-rate "${{ inputs.start_rate }}" \
-            --step-rate "${{ inputs.step_rate }}" --step-mins "${{ inputs.step_mins }}" \
-            --max-rate "${{ inputs.max_rate }}" \
-            --go --out presstest_result.jsonl --report presstest_report.json 2>&1 | tee probe.log
+          SITES="${{ inputs.sites }}"
+          [ -z "$SITES" ] && SITES="${{ inputs.site }}"
+          for s in $(echo "$SITES" | tr ',' ' '); do
+            echo "=== probing $s ==="
+            python presstest/probe.py --site "$s" \
+              --phase "${{ inputs.phase }}" --rate "${{ inputs.rate }}" \
+              --duration "${{ inputs.duration }}" --start-rate "${{ inputs.start_rate }}" \
+              --step-rate "${{ inputs.step_rate }}" --step-mins "${{ inputs.step_mins }}" \
+              --max-rate "${{ inputs.max_rate }}" \
+              --go --out "result_${s}.jsonl" --report "report_${s}.json" 2>&1 | tee -a probe.log
+          done
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: presstest-${{ inputs.site }}-${{ inputs.phase }}-${{ github.run_id }}
+          name: presstest-${{ github.run_id }}
           path: |
-            presstest_result.jsonl
-            presstest_report.json
+            result_*.jsonl
+            report_*.json
             probe.log
           if-no-files-found: warn
