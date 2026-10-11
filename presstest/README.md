@@ -1,0 +1,59 @@
+# presstest — 数据源频控边界压测框架(2026-10-11)
+
+为「多源拆分 + 每源保守拟人刷新策略」提供**实测边界**。每个数据源在一次性云
+出口 IP(GitHub Actions runner)上做一次 ramp→decay,拿到三个数:
+
+| 指标 | 含义 | 用途 |
+|---|---|---|
+| 边界速率 | 首 403 触发档前一档的 req/s | 定生产基准率 |
+| 持续预算 | soak 阶段在该速率下能否浸泡数小时 | 验证长跑不进黑名单 |
+| 恢复时间 | 403 后 decay 轻探回到连续 200 的耗时 | 校准退避梯(governor.Backoff) |
+
+## 站点矩阵(v1,均已具备压测条件)
+
+| key | 域 | 已知情况 | 压测要回答的问题 |
+|---|---|---|---|
+| `jihai_apinode` | api-node.jihai8.com | 闸门=每 IP 聚合频率+时间衰减(定案);生产走云中继 | 干净 IP 边界速率?持续预算?恢复衰减常数? |
+| `jihai_apilive` | api-live.jihai8.com | 宽松;按场次接口 ≥1.2s 已知稳 | 全量+逐场混合的边界;与 apinode 是否同闸 |
+| `jihai_dc` | dc.jihai8.com | **完全未知**(海选静态面主域,生产直连家宽) | 边界;与 api-node 是否独立预算(决定海选方案) |
+| `jihai_www` | www.jihai8.com | 家宽 5req/s 触发 403 约 150s 解封 | 机房 IP 是否同样阈值;解封时间复核 |
+| `f599_rest` | fb-p.599.com | 门禁=TLS 指纹(IP 无关),statistical 无需签名 | 逐场统计接口的频率边界(多源拆分第一候选) |
+
+雷速/懂球帝等待选站:先调研(端点/反爬/门禁),再在 sites.py 加注册项即可压测,
+框架不用改。纳米 MQTT 是推送模型无请求预算,不适用本框架。
+
+## 用法
+
+```bash
+# 本地看计划(dry-run,不发请求)
+python probe.py --list-sites
+python probe.py --site jihai_dc --phase auto
+
+# 真正执行:在 GHA 上(推荐)——把本目录拷进独立公共调度仓,Actions 手动触发 press.yml
+# 或任何一次性云机上:
+python probe.py --site jihai_dc --phase auto --go
+```
+
+**纪律(硬顶写死在 probe.py)**:速率 ≤3 req/s、总请求 ≤30000、首 403 即停
+ramp、decay 轻探 ≤200 次/2h;`--go` 缺省不发请求。**严禁**在 220 中继、家宽、
+采集点等生产出口运行;即嗨四域共享 runner 出口 IP,请串行分别跑(一次一个 job)。
+
+## 产出与回填
+
+- `presstest_result.jsonl`:逐请求(ts/端点/状态码/耗时/阶段)
+- `presstest_report.json`:分档统计 + 边界速率 + `safe_rate_suggested`
+  (=安全档 × 0.4 安全系数)
+
+实测完成后,把边界与恢复时间回填 governor.py 的 `SourceProfile`
+(boundary/safe_factor/backoff 梯度),即得到该源的「保守+拟人抖动」刷新策略:
+生产基准率 = 边界 × 0.4,对数正态抖动(σ=0.35)+ 低概率阅读停顿,
+深夜包络降速,403 走退避梯。该策略由压测与生产共用同一套 Pacer 语义,
+保证「测出来的边界」与「生产跑的策略」是同一把尺子。
+
+## 已知测量噪声
+
+- Azure runner IP 池可能复用:上一轮压测留下的惩罚态会压低本轮边界——
+  解读时以多轮中位数为准;decay 恢复数据反而是最稳的产出。
+- ramp 步进 10 分钟/档:比这更短的闸门窗口会漏检;边界值是「下界」。
+- 599 的 TLS 指纹门禁与 IP 无关,其边界只反映频控层;即嗨四域间是否共闸
+  需四域各自单跑对照(同 runner 连跑时若前一轮 403 残留,四域会互相压低)。
