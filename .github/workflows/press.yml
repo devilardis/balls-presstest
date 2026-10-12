@@ -47,9 +47,13 @@ on:
         required: false
         default: "10"
       max_rate:
-        description: "ramp 速率上限(硬顶 3.0)"
+        description: "ramp 速率上限(硬顶 8.0)"
         required: false
         default: "3.0"
+      decay_max_mins:
+        description: "decay 恢复探测上限分钟(默认 120)"
+        required: false
+        default: "120"
 
 concurrency:
   # jihai 四域共享 runner 出口 IP,族内必须串行;不同站点族(如 f599)目标闸门独立,可并行。
@@ -81,7 +85,8 @@ jobs:
               --phase "${{ inputs.phase }}" --rate "${{ inputs.rate }}" \
               --duration "${{ inputs.duration }}" --start-rate "${{ inputs.start_rate }}" \
               --step-rate "${{ inputs.step_rate }}" --step-mins "${{ inputs.step_mins }}" \
-              --max-rate "${{ inputs.max_rate }}" || true
+              --max-rate "${{ inputs.max_rate }}" \
+              --decay-max-mins "${{ inputs.decay_max_mins }}" || true
           done
 
       - name: Run probe
@@ -95,6 +100,7 @@ jobs:
               --duration "${{ inputs.duration }}" --start-rate "${{ inputs.start_rate }}" \
               --step-rate "${{ inputs.step_rate }}" --step-mins "${{ inputs.step_mins }}" \
               --max-rate "${{ inputs.max_rate }}" \
+              --decay-max-mins "${{ inputs.decay_max_mins }}" \
               --go --out "result_${s}.jsonl" --report "report_${s}.json" 2>&1 | tee -a probe.log
           done
 
