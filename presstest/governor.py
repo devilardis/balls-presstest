@@ -219,9 +219,14 @@ class SourceProfile:
 #   jihai_apilive 3796 请求 全 200(run 38113323142)
 # 故五站边界均记下界 3.0(真实边界 ≥3.0,未触顶),生产基准率 = 3.0 × 0.4
 # = 1.2 req/s;全程零 403 无恢复时间数据,Backoff 梯度沿用默认。
+# 2026-10-12 逐级试探 v2(run 38201196715 ramp 1.0→8.0 全 15 档零 403 + run
+# 38241413938 soak 2.5×~3.4h 29999 请求零 403,instant/statistical 各半):
+# f599_rest 证据升级——短窗与小时级稳态均无封锁,基准率按海选统计扩面需求
+# 定为绝对值 2.5(最小充分速率,覆盖峰值并发 150 场的 1 分钟轮转圈;
+# 非 boundary×0.4 推算,599 门禁=TLS 指纹与速率无关, ramp 未触 8.0 硬顶)。
 PROFILES: dict[str, SourceProfile] = {
     "jihai_dc":      SourceProfile("jihai_dc",      boundary=3.0),
-    "f599_rest":     SourceProfile("f599_rest",     boundary=3.0),
+    "f599_rest":     SourceProfile("f599_rest",     rate=2.5),
     "jihai_www":     SourceProfile("jihai_www",     boundary=3.0),
     "jihai_apinode": SourceProfile("jihai_apinode", boundary=3.0),
     "jihai_apilive": SourceProfile("jihai_apilive", boundary=3.0),
