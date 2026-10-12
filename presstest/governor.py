@@ -11,6 +11,9 @@
 
 本模块只依赖标准库;压测探针(probe.py)与未来 engine/collector 的逐源刷新
 共用同一套节奏语义,保证「测出来的边界」与「生产跑的策略」是同一把尺子。
+
+注:生产正本在 screener/governor.py(2026-10-11 转正);本文件与 GitHub 压测仓
+是镜像副本,改语义多处同步。
 """
 from __future__ import annotations
 
@@ -31,7 +34,8 @@ class Pacer:
     def __init__(self, base_interval: float, *, mode: str = "human",
                  sigma: float = 0.35, pct: float = 0.10,
                  break_prob: float = 0.03, break_range: tuple = (3.0, 15.0),
-                 floor: float = 0.8, seed: int | None = None):
+                 floor: float = 0.8, seed: int | None = None,
+                 due_aligned: bool = False):
         if base_interval <= 0:
             raise ValueError("base_interval must be > 0")
         self.base = float(base_interval)
@@ -43,8 +47,24 @@ class Pacer:
         # floor 不得高于 base,否则目标速率永远达不到(找边界时会被钳住)
         self.floor = min(max(0.0, float(floor)), self.base)
         self.rng = random.Random(seed)
+        # due_aligned:绝对时刻调度(soak 专用,2026-10-12)。相对模式下串行请求耗时
+        # 直接叠加进周期;且 human 模式 floor=0.8 会把 rate>1.25 的几乎全部 delay
+        # 钳到 0.8s,再叠 3% 阅读停顿——名义 2.5 req/s 实测仅 1.007(run 38211996607),
+        # 首轮名义 1.5/1.2 实测 0.71/0.69 同因。绝对模式按 due 序列对齐发起时刻,
+        # 周期≈base 精确达标;默认关闭,生产与 ramp/decay 行为不变。
+        self.due_aligned = bool(due_aligned)
+        self.due = 0.0
 
     def next_delay(self) -> float:
+        if self.due_aligned:
+            now = time.time()
+            if self.due == 0.0:
+                self.due = now
+            d = max(0.0, self.due - now)
+            # 发起时刻序列带 ±pct 抖动,期望速率仍精确等于 1/base
+            raw = self.base * (1.0 + self.rng.uniform(-self.pct, self.pct))
+            self.due = max(now, self.due) + raw
+            return d
         if self.mode == "uniform":
             d = self.base * (1.0 + self.rng.uniform(-self.pct, self.pct))
         else:
