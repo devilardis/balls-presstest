@@ -34,7 +34,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from governor import Pacer, Budget, Backoff          # noqa: E402
 from sites import SITES, get_site, SAMPLE_MATCH_IDS  # noqa: E402
 
-HARD_MAX_RATE = 3.0        # 伦理硬顶:任何配置不得超过
+HARD_MAX_RATE = 8.0        # 硬顶:任何配置不得超过(原 3.0;2026-10-12 用户授权逐级试探
+                           # 被封速率窗口后放宽;首轮 ramp 已证 3.0 内全零 403)
 HARD_MAX_REQUESTS = 30000
 
 
@@ -205,12 +206,14 @@ def phase_auto(t, site, ids_cache, cli_ids, args, out, budget) -> list[dict]:
     if boundary is None:
         print(f"[ramp] 直到 {args.max_rate} req/s 未触发闸门(预算或上限先到)", flush=True)
         return results
-    # ---- decay:轻探恢复(上限 200 探 / 2h,超时即报「未恢复」)
+    # ---- decay:轻探恢复(默认上限 2h;--decay-max-mins 可缩,逐级试探场景
+    #      边界信息到手即可,不必为「未恢复」耗满 2h job)
     print(f"[decay] 每 {args.probe_interval}s 轻探,连续 {args.recover_n} 次 200 判恢复", flush=True)
     pacer = Pacer(1.0 / max(args.probe_interval, 1.0), mode="uniform", floor=1.0)
     backoff = Backoff(trigger_n=999)
+    decay_secs = min(7200, max(60, int(args.decay_max_mins * 60)))
     decay_budget = Budget(max_requests=min(200, HARD_MAX_REQUESTS - budget.n),
-                          max_seconds=7200)
+                          max_seconds=decay_secs)
     r = run_requests(t, site, ids_cache, cli_ids, pacer, decay_budget, backoff,
                      out, "decay", stop_on_block=False,
                      state={"recover_n": args.recover_n})
@@ -239,6 +242,8 @@ def main():
     ap.add_argument("--step-mins", type=float, default=10.0)
     ap.add_argument("--max-rate", type=float, default=3.0)
     ap.add_argument("--probe-interval", type=float, default=180.0, help="decay 轻探间隔秒")
+    ap.add_argument("--decay-max-mins", type=float, default=120.0,
+                    help="decay 恢复探测上限分钟(超时报未恢复)")
     ap.add_argument("--recover-n", type=int, default=5)
     ap.add_argument("--safe-factor", type=float, default=0.4)
     ap.add_argument("--ids", help="逗号分隔的 per_match id(覆盖 bootstrap/内置样本)")
