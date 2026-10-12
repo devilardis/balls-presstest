@@ -279,7 +279,11 @@ def main():
         elif args.phase == "ramp":
             segments = phase_auto(t, site, ids_cache, cli_ids, args, out, budget)
         elif args.phase == "soak":
-            pacer = Pacer.from_rate(args.rate, mode="human")
+            # 绝对时刻调度:相对 pacer 会被 human floor(rate>1.25 时几乎全部钳到 0.8s)
+            # +3% 阅读停顿+串行耗时叠加,名义速率从未真正达标(2026-10-12 实证:名义
+            # 2.5 实测 1.007,首轮名义 1.5/1.2 实测 0.71/0.69)
+            pacer = Pacer.from_rate(args.rate, mode="uniform", pct=0.10,
+                                    floor=0.0, due_aligned=True)
             backoff = Backoff(trigger_n=3)
             # soak 必须按 duration 墙钟停止:此前误用共享预算(max_seconds=duration*3+6h),
             # 实际按 max_requests/速率跑满(如 1.5req/s→5.6h),撞 GHA 355min job 上限被掐、
